@@ -1,5 +1,5 @@
-# 📰 CyberPunk News Aggregator
-**RSS News Aggregator Backend with Redis Pub/Sub**
+# 📰 The Aggregator
+**High-performance RSS/Atom feed aggregator with real-time Redis Pub/Sub**
 
 This is a high-performance, event-driven RSS/Atom feed aggregation service built on Node.js. It is designed as a stateless worker that continuously monitors multiple feed sources, manages item history, and publishes new content in real-time via Redis Pub/Sub. 
 
@@ -146,25 +146,20 @@ Any consumer that wants all news items simply needs to subscribe using a wildcar
 
 ---
 
-## 🎬 Live Demo
+## 🎬 Demo
 
-Try Aggregator in action with our live demo:
-
-[Explore the CyberDeck Aggregator Demo](https://cyberpunk.xyz/aggregator)
+Explore the real-time data pipeline: [Aggregator](https://cyberpunk.xyz/aggregator)
 
 ---
 
 ## 📄 License
 
 The Aggregator is released under the **GNU General Public License v3 (GPLv3)**.  
-
 For inquiries, please reach out via the [contact form](https://cyberpunk.xyz/contact).
 
 ---
 
-## 💻  CyberPunk
-This code is part of the CyberDeck project under the [CyberPunk Network](https://cyberpunk.xyz). 
-
-Also check [ Deck framework ](https://github.com/alek-niko/deck) - A modern, lean, and open-source front-end framework.
+> This code is part of the CyberDeck project under the [CyberPunk Network](https://cyberpunk.xyz). 
+> Also check [ Deck framework ](https://github.com/alek-niko/deck) - A modern, lean, and open-source front-end framework.
 
 ---
