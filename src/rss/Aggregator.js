@@ -12,7 +12,7 @@ import * as dbError from '../models/error.js'
 
 import FeedEmitter from './FeedEmitter.js';
 
-import { publisher, subscriber } from '../database/redis.js';
+import { publisher, subscriber } from '../config/redis.js';
 
 /**
  * @class Aggregator

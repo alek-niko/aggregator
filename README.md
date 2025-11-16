@@ -80,6 +80,8 @@ Start the aggregator:
 node app.js
 ```
 
+---
+
 ## 🗂️ Project Directory Structure
 
 ```text
@@ -105,6 +107,7 @@ src
 ├─ package.json
 └─ app.js
 ```
+---
 
 ## 🧬 Code Structure Overview
 
@@ -119,6 +122,8 @@ The core logic is found within the `src/rss/` directory:
 | `FeedError.js`   | **Custom Error**      | Extends `Error` to add contextual properties like the originating feed's URL. |
 | `FeedItem.js`    | **Item Model**        | Normalizes RSS entries (`title`, `link`, `pubDate`, `guid`, etc.) |
 
+---
+
 ## 📡 Redis Pub/Sub Channels
 
 | Channel Name                  | Direction | Purpose                                                                                           |
@@ -127,6 +132,7 @@ The core logic is found within the `src/rss/` directory:
 | `aggregator`                  | **Subscribe** | Listens for administrative commands (e.g., `reload`, `add_feed`) for dynamic control.            |
 | `aggregator-errors`                  | **Publish** | All processing errors (fetch failures, parsing issues) are published here for external monitoring.            |
 
+---
 
 ### ⚡ Consumer Subscription Guide
 
@@ -154,7 +160,7 @@ The Aggregator is released under the **GNU General Public License v3 (GPLv3)**.
 
 For inquiries, please reach out via the [contact form](https://cyberpunk.xyz/contact).
 
-
+---
 
 ## 💻  CyberPunk
 This code is part of the CyberDeck project under the [CyberPunk Network](https://cyberpunk.xyz). 
