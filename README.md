@@ -64,8 +64,11 @@ REDIS_PORT=6379
 ```
 
 ### 4. Setup your prefered Database
-> **Note:** You must set up your own **MySQL/MariaDB** database to use with this system — this setup is **not provided**.  
+> **Note:** You must set up your own **MySQL/MariaDB** database to use with this system [**not provided**].  
 > The backend relies on **4 tables only**. Full table structures are defined in `config/database.sql`.
+```bash
+mysql -u [username] -p < database.sql
+```
 
 
 ### 5. Running the Application
@@ -87,7 +90,8 @@ node app.js
 ```text
 src
 ├── database
-│   ├── pool.js
+│   ├── database.sql
+│   ├── db.js
 │   └── redis.js
 ├── models
 │   ├── error.js
@@ -102,6 +106,8 @@ src
 │   ├── FeedItem.js
 │   └── FeedManager.js
 └── services
+│   ├── FeedService.js
+│   ├── ItemService.js
 │   └── database.js
 ├─ .env
 ├─ package.json
