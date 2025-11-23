@@ -1,6 +1,7 @@
 /**
  * @module db.error
  * @description This module contains methods for logging errors related to RSS processing
+ *				by inserting records directly into the `rss_errors` database table.
  *
 	`id`			bigint(8) NOT NULL AUTO_INCREMENT,
 	`type`			varchar(255) DEFAULT NULL,
@@ -14,8 +15,7 @@
  * @description Provides access to `query` for SELECT operations and 
  * 				`execute` for INSERT, UPDATE, DELETE, and other statements.
  */
-import { query, execute } from '../../services/db/database.service.js';
-
+import { query, execute } from '../services/database.js';
 
 /**
  * @function log
@@ -23,25 +23,22 @@ import { query, execute } from '../../services/db/database.service.js';
  *
  * @param {Object} data - The error data to be logged.
  * @param {string} data.type - The type or name of the error (e.g., 'Timeout', 'InvalidXML').
- * @param {number|null} [data.feed_Id=null] - The ID of the feed site (`rss_sites.id`) associated with the error. Optional.
+ * @param {number|null|undefined} [data.feed_id] - The ID of the feed site (`rss_sites.id`) associated with the error. Optional.
  * @param {string} data.message - The detailed error message or stack trace string.
  * @returns {Promise<number|null>} A promise that resolves to the **inserted row's ID** if successful,
  * or **null** if the insertion failed or if required data was missing.
  */
 async function log(data) {
 	
-	// Validate if essential data is present. The original logic was inverted.
-    // We require 'type' and 'message' to log a meaningful error.
-    if (!data || !data.type || !data.message) {
-        // Return null if critical information is missing.
-        return null;
-    }
+	// Validate if essential data is present.
+	if (!data || !data.type || !data.message) {
+		return null;
+	}
 
-	// Destructure properties, mapping the function's 'type' parameter to the column 'type'
-    // and ensuring the column name `feed_Id` matches the database schema.
+	// Destructure and defensively coerce feed_id to null if it's undefined.
 	const {
 		type,
-		feedId = null,
+		feed_id,
 		message
 	} = data;
 
@@ -52,25 +49,23 @@ async function log(data) {
 	`;
 
 	// Array of parameters for the prepared statement.
-    const params = [type, feed_Id, message];
+	const params = [type, feed_id, message];
 
 	// Execute the insertion query. The result is typically an array containing the execution result object.
-	const [result] = await execute(sqlQuery, params);
+	//const [result] = await execute(sqlQuery, params);
 
 	try {
-        // Execute the insertion query.
-		// The result is typically an array containing the execution result object.
-        const [result] = await execute(sqlQuery, params);
+		// Execute the insertion query.
+		const [result] = await execute(sqlQuery, params);
 
-        // Check if a row was affected (inserted). 
 		// Return the insertId if successful, otherwise return null.
-        return result.affectedRows ? result.insertId : null;
+		return result.affectedRows ? result.insertId : null;
 
-    } catch (error) {
-        // Log the database execution error itself, then return null to indicate failure.
-        console.error(`DB Error: Failed to insert error log into rss_errors: ${error.message}`);
-        return null;
-    }
+	} catch (error) {
+		// Log the database execution error itself, then return null to indicate failure.
+		console.error(`DB Error: Failed to insert error log into rss_errors: ${error.message}`);
+		return null;
+	}
 }
 
 export {
