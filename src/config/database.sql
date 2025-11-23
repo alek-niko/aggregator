@@ -75,7 +75,15 @@ CREATE TABLE `rss_news` (
   `date`     DATETIME             NOT NULL DEFAULT CURRENT_TIMESTAMP,
   
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_url` (`url`),
+
+  -- NEW: Compound Unique Key to prevent duplicate news items from the same website
+  CONSTRAINT `uq_website_url` UNIQUE KEY (`website`, `url`),
+  
+  -- The original unique index on url is redundant now and has been removed, 
+  -- but a simple index on url for quick lookup may be kept if desired:
+  -- KEY `idx_url` (`url`),
+  -- UNIQUE KEY `uq_url` (`url`),
+  
   KEY `idx_category` (`category`),
   KEY `idx_website` (`website`),
   KEY `idx_date` (`date`),
