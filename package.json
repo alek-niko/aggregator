@@ -1,7 +1,7 @@
 {
 	"name": "aggregator",
-	"version": "0.1",
-	"description": "CyberDeck: RSS News Aggregator",
+	"version": "0.2",
+	"description": "High-performance RSS/Atom feed aggregator",
 	"author": "Alek Niko",
 	"type": "module",
 	"private": true,
@@ -14,7 +14,10 @@
 		"emitter",
 		"aggregator",
 		"news",
-		"atom"
+		"atom",
+		"sql",
+		"redis",
+		"pubsub"
 	],
 	"dependencies": {
 		"dotenv": "^16.4.5",
