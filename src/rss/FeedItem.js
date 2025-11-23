@@ -1,7 +1,7 @@
 /**
- * @module FeedItem
+ * @module rss.feed.item
  * @description Exports the {@link FeedItem} class, which serves as a standardized
- * data structure for a single news entry fetched from an RSS or Atom feed.
+ * 				data structure for a single news entry fetched from an RSS or Atom feed.
  */
 
 'use strict';
