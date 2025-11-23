@@ -6,45 +6,55 @@
  * 				via Redis Pub/Sub.
  */
 
-import * as dbFeed from '../models/feed.js' 
-import * as dbItem from '../models/item.js' 
-import * as dbError from '../models/error.js' 
+'use strict';
 
+import * as dbError from '../models/error.js' // Keep for direct error logging
 import FeedEmitter from './FeedEmitter.js';
-
+import ItemService from '../services/ItemService.js';
 import { publisher, subscriber } from '../config/redis.js';
 
 /**
  * @class Aggregator
  * @description The main class responsible for orchestrating RSS feed aggregation.
- * 				It manages the FeedEmitter, handles database interactions,
- * 				and uses Redis Pub/Sub for communication.
+ * 				It manages the FeedEmitter, handles database persistence via ItemService,
+ * 				and uses Redis Pub/Sub for communication and control.
  */
 class Aggregator {
 
 	/**
-     * @constructor
-     * @description Initializes a new instance of the RssAggregator.
-     * Sets up the FeedEmitter with specified options and initializes event handlers.
+     * @constant {number} MAX_CONSECUTIVE_FAILURES - The maximum number of consecutive transient errors before a feed is permanently disabled.
      */
+	static MAX_CONSECUTIVE_FAILURES = 5;
+	
+	/**
+	 * @constructor
+	 * @description Initializes a new instance of the Aggregator.
+	 * Sets up the FeedEmitter, service layer access, Redis clients, and event handlers.
+	 */
 	constructor() {
 		/**
 		 * @property {FeedEmitter} feedEmitter - The instance of the underlying feed-monitoring library.
 		 */
 		this.feedEmitter = new FeedEmitter({
-			// Prevents the emitter from fetching all feeds immediately on creation.
-			skipFirstLoad: true,
 			// Custom user agent to identify the aggregator client during fetches.
 			userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0'
 		});
+
+		/**
+		 * @property {Map<number, object>} failureTracker - Tracks consecutive failures for each feed ID.
+		 * The structure is: { feedId: { count: number, originalInterval: number } }
+		 */
+		this.failureTracker = new Map();
+
+		this.itemService = new ItemService();
+		this.publisher = publisher
 
 		this.initializeEventHandlers();
 	}
 
 	/**
      * @method initializeEventHandlers
-     * @description Sets up all event handlers for feed events and process-wide error handling.
-     * This method is crucial for the application's reactivity and stability.
+     * @description Sets up all event handlers for feed events, Redis Pub/Sub control, and process stability.
      */
 	initializeEventHandlers() {
 
@@ -60,112 +70,258 @@ class Aggregator {
 		// Handle incoming messages on all subscribed channels.
 		subscriber.on("message", (channel, data) => this.handleRedisMessage(channel, data));
 
-
 		process.on('unhandledRejection', (reason, promise) => this.handleUnhandledRejection(reason, promise));
 
 		// Process Stability & Shutdown Handlers
 
 		// Communication handler (e.g., for cluster messages)
-        process.on('message', this.handleProcessMessage);
+		process.on('message', this.handleProcessMessage);
 
-        // Graceful Shutdown Handlers (SIGTERM/SIGINT)
-        process.on('SIGTERM', () => this.handleShutdown('SIGTERM'));
-        process.on('SIGINT', () => this.handleShutdown('SIGINT'));
+		// Graceful Shutdown Handlers (SIGTERM/SIGINT)
+		process.on('SIGTERM', () => this.handleShutdown('SIGTERM'));
+		process.on('SIGINT', () => this.handleShutdown('SIGINT'));
 
-        // Exit Handler (Final cleanup logging)
-        process.on('exit', () => console.log('[instance] Instance terminated.'));
+		// Exit Handler (Final cleanup logging)
+		process.on('exit', () => console.log('[instance] Instance terminated.'));
 
-        // Critical Error Handlers (Ensure immediate exit after corruption)
-        process.on('uncaughtException', err => this.handleUncaughtException(err));
-        process.on('unhandledRejection', (reason, promise) => this.handleUnhandledRejection(reason, promise));
+		// Critical Error Handlers (Ensure immediate exit after corruption)
+		process.on('uncaughtException', err => this.handleUncaughtException(err));
+		process.on('unhandledRejection', (reason, promise) => this.handleUnhandledRejection(reason, promise));
 	}
 
 	/**
      * @method handleNewItem
      * @description Handles a new RSS item received by the feed emitter.
-     * 				Saves the item to the database and publishes it to 
-	 * 				a Redis channel specific to its category.
+     * 				Saves the item to the database using ItemService and publishes it to Redis.
      *
-     * @param {FeedItem} item - The RSS item data, including title, url, category, and website ID.
+     * @param {Object} item - The RSS item data, including 'website' (feedId).
      * @returns {Promise<void>}
      */
-	async handleNewItem(item) {
+    async handleNewItem(item) {
 
-		try {
-			// Save the item and retrieve the newly inserted ID.
-			const id = await dbItem.save(item);
-			item.id = id;
+        try {
+            // ItemService.insert handles database insertion and returns the new ID.
+            const id = await this.itemService.insert(item);
+            item.id = id;
 
-			// Publish the item to Redis. The channel is dynamically set by category.
-			publisher.publish(
-				`feed:wire:${item.category}`,
-				JSON.stringify({
-					event: `feed:wire:${item.category}`,
-					data: item
-				})
-			);
+            // Publish the item to the category-specific Redis channel.
+            this.publisher.publish(
+                `feed:wire:${item.category}`,
+                JSON.stringify({
+                    event: `feed:wire:${item.category}`,
+                    data: item
+                })
+            );
+            
+            // Clear backoff tracking as the item fetch/save was successful.
+            this.failureTracker.delete(item.website); 
 
-		} catch (error) {
-			// Log the error and proceed. The system should not crash if saving a single item fails.
-            // Using dbError.log here is risky as it could create an error loop.
-			console.error('Error saving news item and publishing:', error);
-		}
-	}
+        } catch (error) {
+
+            // Log the save error using the direct database error logger (dbError.log).
+            console.error('Error saving news item and publishing:', error);
+
+            dbError.log({
+                type: error.name || 'item_save_error',
+                message: error.message,
+                feed_id: item.website ?? null, // Ensure null coercion
+            }).catch(e => console.error('CRITICAL: Failed to log error to DB:', e));
+        }
+    }
+
+	/**
+     * @method handleProcessMessage
+     * @description Handles incoming messages from the parent process (IPC).
+     * 				Supported commands: 'reload'
+	 * 
+     * @param {string | object} message - The incoming IPC message.
+     * @returns {void}
+     */
+    handleProcessMessage(message) {
+
+        if (typeof message === 'object' && message.command) {
+            switch (message.command) {
+                case 'reload':
+                    // Command to reload the feed configuration from the database
+                    console.log(`[IPC] Received 'reload' command. Initiating feed refresh.`);
+                    this.feedEmitter.reloadFeeds(); 
+                    break;
+                default:
+                    console.warn(`[IPC] Received unknown command: ${message.command}`);
+            }
+        }
+    }
+
+	/**
+     * @method handleShutdown
+     * @description Initiates a graceful shutdown of the process.
+     * 				Cleans up resources like Redis client connections and stops all feed intervals.
+	 * 
+     * @param {string} signalOrReason - The signal (SIGINT/SIGTERM) or reason (CRITICAL_ERROR).
+     * @returns {void}
+     */
+    handleShutdown(signalOrReason) {
+
+        console.warn(`[SHUTDOWN] Initiating graceful shutdown due to: ${signalOrReason}`);
+        
+        // Stop all polling intervals in the emitter
+        this.feedEmitter.destroy(); 
+
+        // Publish a shutdown notice (optional, good for monitoring)
+        this.publisher.publish(
+            'aggregator-status',
+            JSON.stringify({ status: 'shutdown', reason: signalOrReason, pid: process.pid })
+        );
+        
+        // Close the Redis client connections
+        if (this.publisher && typeof this.publisher.quit === 'function') {
+            this.publisher.quit();
+        }
+
+        // Exit the process gracefully
+        process.exit(0);
+    }
 
 	/**
      * @method handleError
      * @description Handles errors that occur during feed processing (e.g., fetch, parse errors).
-     * 				Logs the error to the database, removes problematic feeds, 
-	 * 				and publishes the error to a Redis channel.
+     * 				Logs the error and implements exponential backoff for transient errors.
      *
      * @param {FeedError} error - The feed error object.
      * @returns {Promise<void>}
      */
-	async handleError(error) {
-
-		// Log to console for immediate visibility.
-		console.log(`[${error.name}] ${error.message}: ${error.feed}`);
-
-		// Handle permanent/severe errors by removing the feed.
-		if (['fetch_url_error', 'parse_url_error'].includes(error.name)) {
-			// Remove the feed from the emitter to stop retrying immediately.
-			// Handle this better
-			this.feedEmitter.remove(error.feed);
-		}
-
-		// Log the error to the database. Wrapped in a try/catch to ensure stability.
-		try {
-			await dbError.log({
-				type: error.name,
+    async handleError(error) { 
+        
+        // Publish for real-time monitoring
+		const dataToPublish = (typeof error.toJSON === 'function')
+			? error.toJSON() // Use custom method if available (i.e., if it's a FeedError)
+			: { 
+				name: error.name || 'UnknownError',
 				message: error.message,
-				feedId: error.feedId,
-			});
-		} catch (e) {
-			// This is the fallback of the fallback (failed to log an error).
-			console.error('CRITICAL: Failed to log error to the database:', e);
-		}
+				feed: error.feed ?? null,
+				feedId: error.feedId ?? null
+			};
 
-		// Publish the error to a central Redis channel for monitoring/other services.
-		publisher.publish(
-			`aggregator-errors`,
-			JSON.stringify({
-				event: `error`,
-				type: error.name,
-				message: error.message,
-				feedId: error.feedId,
-				feed: error.feed,
-			})
-		);
-	}
+		// Publish for real-time monitoring
+		this.publisher.publish('aggregator-errors', JSON.stringify(dataToPublish));
+
+        // Log to console
+        console.error(`[${error.name}] ${error.message}`, { feed: error.feed, id: error.feedId });
+
+        const isTransientError = ['fetch_url_error', 'parse_url_error'].includes(error.name);
+        const isCriticalError = ['db_connect_error', 'redis_error'].includes(error.name);
+
+        // Handle Transient Errors (Backoff Logic)
+        if (isTransientError && error.feedId && error.feed) {
+            
+			// This method returns a running Feed instance containing the current config.
+            const feedConfig = this.feedEmitter.getFeedConfig(error.feed); 
+            
+            if (feedConfig) {
+                // Ensure backoff/removal is completed before proceeding.
+                await this.handleFeedFailure(error.feedId, error.feed, feedConfig.refresh);
+            } else {
+                console.warn(`[WARNING] Could not find running feed config for ID ${error.feedId}. Skipping backoff.`);
+            }
+
+        // Handle Critical Errors (Shutdown Logic)
+        } else if (isCriticalError) {
+
+            console.error('CRITICAL SYSTEM ERROR DETECTED. Shutting down.', error);
+
+			// Log the critical error to the database BEFORE shutting down
+            await dbError.log({ 
+                type: error.name || 'critical_error',
+                message: error.message,
+                feed_id: error.feedId ?? null, // Ensure null coercion
+            }).catch(e => console.error('CRITICAL: Failed to log error to DB during shutdown:', e));
+            
+            this.handleShutdown('CRITICAL_ERROR');
+
+        // Handle Other Errors (Clear tracking if they succeed on the next run)
+        } else {
+           
+			// Log the error to the database for audit
+            await dbError.log({
+                type: error.name || 'internal_error',
+                message: error.message,
+                feed_id: error.feedId ?? null, // FIX: Used feed_id and null coercion.
+            }).catch(e => console.error('CRITICAL: Failed to log error to DB during internal failure:', e));
+            
+            // Clear tracking if it was a successful fetch but failed in processing.
+            this.failureTracker.delete(error.feedId);
+        }
+    }
+	
+	/**
+     * @method handleFeedFailure
+     * @description Implements exponential backoff for a feed that has failed a transient operation.
+     * 				If the failure threshold is reached, the feed is removed permanently.
+	 * 
+     * @param {number} feedId - The ID of the feed that failed.
+     * @param {string} feedUrl - The URL of the feed (needed for removal).
+     * @param {number} originalInterval - The base polling interval in ms.
+     * @returns {Promise<void>}
+     */
+    async handleFeedFailure(feedId, feedUrl, originalInterval) {
+        const tracking = this.failureTracker.get(feedId) || { count: 0, originalInterval };
+        
+        tracking.count += 1;
+        this.failureTracker.set(feedId, tracking);
+
+        // Check if the maximum failure threshold is reached
+        if (tracking.count >= Aggregator.MAX_CONSECUTIVE_FAILURES) {
+            // PERMANENT REMOVAL: Log as permanently failed and remove.
+            console.error(`[FATAL FEED] Feed ID ${feedId} (${feedUrl}) permanently disabled after ${Aggregator.MAX_CONSECUTIVE_FAILURES} consecutive failures.`);
+            
+            // Remove the feed from the emitter to stop all retries and delete from DB.
+            await this.feedEmitter.remove(feedUrl); // This is now an async operation
+            this.failureTracker.delete(feedId);
+            
+            // Publish the permanent failure for external monitoring
+            this.publisher.publish(
+                'aggregator-errors',
+                JSON.stringify({
+                    type: 'permanent_failure',
+                    feedId,
+                    feedUrl,
+                    message: `Permanently disabled after ${tracking.count} consecutive failures.`
+                })
+            );
+
+			// Log the permanent removal reason to the database error log
+            await dbError.log({
+                type: 'permanent_failure',
+                message: `Feed disabled due to ${tracking.count} consecutive failures.`,
+                feed_id: feedId, // Use feed_id (snake_case)
+            });
+
+            return;
+        }
+
+        // Exponential Backoff Calculation
+        // New interval = Original Interval * 2^(count - 1), capped at 24 hours.
+        const multiplier = Math.pow(2, tracking.count - 1);
+        const MAX_INTERVAL_MS = 86400000; // 24 hours
+        const newInterval = Math.min(originalInterval * multiplier, MAX_INTERVAL_MS); 
+
+        console.warn(
+            `[FEED FAILURE ${tracking.count}/${Aggregator.MAX_CONSECUTIVE_FAILURES}] ` + 
+            `Feed ID ${feedId} (${feedUrl}) failed. New interval set to ${newInterval / 60000} minutes.`
+        );
+        
+        // Update the feed's interval in the Emitter
+        await this.feedEmitter.updateInterval(feedUrl, newInterval);
+    }
 
 	/**
-     * @method handleRedisSubscription
-     * @description Handles the result of subscribing to a Redis channel.
-     *
-     * @param {?Error} err - Error object if the subscription fails.
-     * @param {number} count - Number of channels currently subscribed to by this client.
-     * @returns {void}
-     */
+	 * @method handleRedisSubscription
+	 * @description Handles the result of subscribing to a Redis channel.
+	 *
+	 * @param {?Error} err - Error object if the subscription fails.
+	 * @param {number} count - Number of channels currently subscribed to by this client.
+	 * @returns {void}
+	 */
 	handleRedisSubscription(err, count) {
 		if (err) {
 			console.error('Failed to subscribe to Redis control channel:', err);
@@ -175,52 +331,50 @@ class Aggregator {
 	}
 
 	/**
-     * @method handleRedisMessage
-     * @description Handles control messages received from the Redis channel.
-     * Supports 'add', 'remove', and 'replace' commands for managing feeds dynamically.
-     *
-     * @param {string} channel - The Redis channel name (expected 'aggregator').
-     * @param {string} data - The JSON string payload containing the command (`cmd`) and feed information.
-     * @returns {void}
-     */
+	 * @method handleRedisMessage
+	 * @description Handles control messages received from the Redis channel.
+	 * 				Supports 'add', 'remove', and 'replace' commands for managing feeds dynamically.
+	 *
+	 * @param {string} channel - The Redis channel name (expected 'aggregator').
+	 * @param {string} data - The JSON string payload containing the command (`cmd`) and feed information.
+	 * @returns {void}
+	 */
 	handleRedisMessage(channel, data) {
 
-		try {
-            const message = JSON.parse(data);
+       // Use an IIFE to handle the asynchronous Redis processing logic
+        (async () => {
+            try {
+                const message = JSON.parse(data);
 
-            switch (message.cmd) {
-                case "add":
-                    // Adds a new feed to the emitter. Assumes 'message' contains the full feed object.
-                    this.feedEmitter.add(message);
-                    console.log(`[CMD] Added feed: ${message.url}`);
-                    break;
-                case "remove":
-                    // Removes a feed by its URL.
-                    this.feedEmitter.remove(message.url);
-                    console.log(`[CMD] Removed feed: ${message.url}`);
-                    break;
-                case "replace":
-                    // Removes and then re-adds the feed to apply new settings (e.g., refresh interval).
-                    this.feedEmitter.remove(message.url);
-                    this.feedEmitter.add(message);
-                    console.log(`[CMD] Replaced feed: ${message.url}`);
-                    break;
-                default:
-                    console.warn(`[CMD] Unknown command received on ${channel}: ${message.cmd}`);
+                switch (message.cmd) {
+                    case "add":
+                        await this.feedEmitter.add(message);
+                        console.log(`[CMD] Added feed: ${message.url}`);
+                        break;
+                    case "remove":
+                        await this.feedEmitter.remove(message.url);
+                        console.log(`[CMD] Removed feed: ${message.url}`);
+                        break;
+                    case "replace":
+                        // Ensure atomic replacement by awaiting removal then addition
+                        await this.feedEmitter.remove(message.url);
+                        await this.feedEmitter.add(message);
+                        console.log(`[CMD] Replaced feed: ${message.url}`);
+                        break;
+                    default:
+                        console.warn(`[CMD] Unknown command received on ${channel}: ${message.cmd}`);
+                }
+
+            } catch (error) {
+                console.error('Error processing Redis message:', error, 'Raw Data:', data);
             }
-
-        } catch (error) {
-            console.error('Error processing Redis message:', error, 'Raw Data:', data);
-        }
-	}
+        })();
+    }
 
 	/**
      * @method handleUncaughtException
-     * @description Handles uncaught exceptions (synchronous errors) that occur in the process.
-     * Logs the error and attempts to shut down gracefully (though Node will exit shortly after).
-	 * 
-	 * Handles uncaught exceptions that occur in the Node.js process.
-     * Logs the error details and exits immediately as the process state is corrupted.
+     * @description Handles uncaught exceptions (synchronous errors) that corrupt the process state.
+     * 				Logs the error and attempts a final cleanup before exiting immediately.
      *
      * @param {Error} err - The error object.
      * @returns {void}
@@ -228,38 +382,33 @@ class Aggregator {
 	handleUncaughtException(err) {
 
 		// Log the error details with stack trace.
-        console.error('FATAL: Uncaught Exception:', err.stack || err);
-
-        // It's common practice to exit the process after an uncaught exception.
-        
+		console.error('FATAL: Uncaught Exception:', err.stack || err);
+		
 		// Clean shutdown: destroy feeds before exiting.
-        this.feedEmitter.destroy(); 
-        process.exit(1);
+		this.feedEmitter.destroy(); 
+		process.exit(1);
 	}
 
 	/**
      * @method handleUnhandledRejection
-     * @description Handles unhandled promise rejections in the Node.js process.
-     * Logs the reason but often does NOT exit immediately, though exiting is safer.
-     * We'll exit immediately here for maximum stability.
+     * @description Handles unhandled promise rejections. Logs the reason and exits immediately for stability.
      *
      * @param {*} reason - The reason why the promise was rejected.
      * @param {Promise<any>} promise - The promise that was rejected.
      * @returns {void}
      */
-    handleUnhandledRejection(reason, promise) {
-        // Log the rejection details.
-		syslog.error('FATAL: Unhandled Rejection at:', promise, 'reason:', reason);
+	handleUnhandledRejection(reason, promise) {
+		// Log the rejection details.
+		console.error('FATAL: Unhandled Rejection at:', promise, 'reason:', reason);
 
 		// Clean shutdown: destroy feeds before exiting.
-        this.feedEmitter.destroy();
-        process.exit(1);
-    }
+		this.feedEmitter.destroy();
+		process.exit(1);
+	}
 
 	/**
      * @method start
-     * @description Starts the RSS Aggregator by loading all active RSS feeds from the database
-     * and adding them to the feed emitter for monitoring.
+     * @description Starts the RSS Aggregator by calling FeedEmitter's internal initialization.
      *
      * @returns {Promise<void>}
      */
@@ -268,21 +417,13 @@ class Aggregator {
         console.log('Starting RSS Aggregator...');
 
         try {
-            // Fetch all feed configuration sites from the database.
-            const feeds = await dbFeed.get();
+            // Emitter fetches feeds from the DB and starts their polling intervals.
+            const feedCount = await this.feedEmitter.init();
 
-            if (!feeds || feeds.length === 0) {
-                console.warn('No feeds found in the database. Aggregator is running but not monitoring any sites.');
-            }
-
-            // Add each feed configuration to the emitter for monitoring.
-            for (const feed of feeds) {
-                this.feedEmitter.add(feed);
-            }
-            console.log(`Successfully started monitoring ${feeds.length} feeds.`);
+            console.log(`Successfully started monitoring ${feedCount} feeds.`);
 
         } catch (error) {
-            console.error('FATAL: Failed to initialize/start aggregator due to DB error:', error);
+            console.error('FATAL: Failed to initialize/start aggregator:', error);
             // Re-throw or exit, as the core functionality is disabled without feeds.
             throw error;
         }
