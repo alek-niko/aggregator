@@ -16,23 +16,6 @@ import FeedError from '../rss/FeedError.js';
 class FeedService {
 
 	/**
-	 * @method getAll
-	 * @description Retrieves all active feed configurations from the database.
-	 * 
-	 * @returns {Promise<Object[]>} A promise that resolves to an array of feed configuration objects.
-	 * @throws {FeedError} If the database query fails.
-	 */
-	async getAll() {
-		try {
-			// Delegates the raw database query to the model layer.
-			return await dbFeed.get();
-		} catch (error) {
-			// Wraps the native DB error in a FeedError for consistent application-wide handling.
-			throw new FeedError('DB Error: Failed to fetch all feed configurations.', 'db_error', null, null, error);
-		}
-	}
-
-	/**
 	 * @method addOrUpdate
 	 * @description Inserts a new feed or updates an existing one based on the URL (upsert logic).
 	 * 
@@ -92,8 +75,28 @@ class FeedService {
 		try {
 			// Delegates the deletion query to the model layer.
 			return await dbFeed.removeByUrl(url);
+			
 		} catch (error) {
 			throw new FeedError(`DB Error: Failed to remove feed: ${url}`, 'db_error', url, null, error);
+		}
+	}
+
+	/**
+	 * @method getAll
+	 * @description Retrieves all active feed configurations from the database.
+	 * 
+	 * @returns {Promise<Object[]>} A promise that resolves to an array of feed configuration objects.
+	 * @throws {FeedError} If the database query fails.
+	 */
+	async getAll() {
+
+		try {
+			// Delegates the raw database query to the model layer.
+			return await dbFeed.get();
+			
+		} catch (error) {
+			// Wraps the native DB error in a FeedError for consistent application-wide handling.
+			throw new FeedError('DB Error: Failed to fetch all feed configurations.', 'db_error', null, null, error);
 		}
 	}
 }
