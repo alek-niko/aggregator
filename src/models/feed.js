@@ -19,40 +19,6 @@
 import { query, execute } from '../services/database.js';
 
 /**
- * @function get
- * @description Retrieves all active feed entries (RSS site configurations) from the `rss_sites` table.
- * 
- * @returns {Promise<Object[]>} A promise that resolves to an array of feed objects.
- */
-async function get() {
-
-	// SQL query to select the essential columns from the rss_sites table.
-	const sqlQuery = `SELECT id, name, url, category, refresh FROM rss_sites`;
-
-	// Execute the query to fetch the rows.
-	const rows = await query(sqlQuery);
-
-	// Return the fetched rows or an empty array.
-	return rows.length ? rows : []; 
-}
-
-/**
- * @function getByUrl
- * @description Retrieves a single feed entry based on its unique URL.
- * 
- * @param {string} url - The URL of the feed site.
- * @returns {Promise<Object|null>} A promise that resolves to the feed object or null if not found.
- */
-async function getByUrl(url) {
-
-	const sqlQuery = `SELECT id, name, url, category, refresh FROM rss_sites WHERE url = ?`;
-	
-	const rows = await query(sqlQuery, [url]);
-	
-	return rows[0] || null;
-}
-
-/**
  * @function insert
  * @description Inserts a new feed configuration into the database.
  * 
@@ -104,6 +70,40 @@ async function update(feedConfig) {
 }
 
 /**
+ * @function get
+ * @description Retrieves all active feed entries (RSS site configurations) from the `rss_sites` table.
+ * 
+ * @returns {Promise<Object[]>} A promise that resolves to an array of feed objects.
+ */
+async function get() {
+
+	// SQL query to select the essential columns from the rss_sites table.
+	const sqlQuery = `SELECT id, name, url, category, refresh FROM rss_sites`;
+
+	// Execute the query to fetch the rows.
+	const rows = await query(sqlQuery);
+
+	// Return the fetched rows or an empty array.
+	return rows.length ? rows : []; 
+}
+
+/**
+ * @function getByUrl
+ * @description Retrieves a single feed entry based on its unique URL.
+ * 
+ * @param {string} url - The URL of the feed site.
+ * @returns {Promise<Object|null>} A promise that resolves to the feed object or null if not found.
+ */
+async function getByUrl(url) {
+
+	const sqlQuery = `SELECT id, name, url, category, refresh FROM rss_sites WHERE url = ?`;
+	
+	const rows = await query(sqlQuery, [url]);
+	
+	return rows[0] || null;
+}
+
+/**
  * @function removeByUrl
  * @description Deletes a feed configuration from the database by its URL.
  * 
@@ -120,9 +120,9 @@ async function removeByUrl(url) {
 }
 
 export {
-	get,
-	getByUrl,
 	insert,
 	update,
+	get,
+	getByUrl,
 	removeByUrl
 }
