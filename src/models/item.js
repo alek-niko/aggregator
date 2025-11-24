@@ -75,7 +75,7 @@ async function existsByUrlOrTitle(websiteId, url, title) {
 		WHERE website = ? AND (url = ? OR title = ?) 
 		LIMIT 1
 	`;
-	
+
 	// Execute the query.
 	const rows = await query(sqlQuery, [websiteId, url, title]);
 
@@ -83,7 +83,57 @@ async function existsByUrlOrTitle(websiteId, url, title) {
 	return rows.length > 0;
 }
 
+/**
+ * @function bulkInsertIgnore
+ * @description Executes a race-safe, bulk insertion using INSERT IGNORE.
+ * 				Uses the 'query' function to support the specialized 'VALUES ?' syntax.
+ * 
+ * @param {Array<Array>} values - 2D array of item values ([title, url, category, website]...).
+ * @returns {Promise<void>}
+ */
+async function bulkInsertIgnore(values) {
+
+    if (!values || values.length === 0) {
+        return;
+    }
+
+    const insertSql = `INSERT IGNORE INTO rss_news (title, url, category, website) VALUES ?`;
+
+    // CRITICAL FIX: Use 'query' instead of 'execute' for bulk insertion (VALUES ?).
+    // The underlying pool.query method supports the bulk array substitution.
+    // The returned rows are discarded, but the operation succeeds.
+    await query(insertSql, [values]);
+}
+
+/**
+ * @function getInsertedItemsByUrlAndDate
+ * @description Retrieves items that were inserted in the current batch, identified by 
+ * 				URL, website, and a start time timestamp. This is the post-UPSERT identification step.
+ * 
+ * @param {number} websiteId - The ID of the feed/website.
+ * @param {string[]} urls - An array of all URLs processed in the current batch.
+ * @param {string} startTime - The timestamp string (MySQL format) when processing began.
+ * @returns {Promise<Object[]>} A promise that resolves to an array of inserted item rows.
+ */
+async function getInsertedItemsByUrlAndDate(websiteId, urls, startTime) {
+
+	if (!urls || urls.length === 0) {
+		return [];
+	}
+
+	const selectSql = `SELECT url FROM rss_news WHERE website = ? AND url IN (?) AND date >= ?`;
+
+	// Execute the SELECT query.
+	const rows = await query(selectSql, [websiteId, urls, startTime]);
+
+	// Return the resulting rows (which only contain the 'url' needed for mapping).
+	return rows;
+}
+
 export {
 	save,
-	existsByUrlOrTitle
+	existsByUrlOrTitle,
+
+	bulkInsertIgnore,
+	getInsertedItemsByUrlAndDate
 }
