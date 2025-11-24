@@ -35,7 +35,7 @@ class FeedEmitter extends EventEmitter {
 	 * @param {boolean} [options.skipFirstLoad=false] - If true, initial fetch (on startup) will not emit new items.
 	 */
 	constructor({ userAgent = FeedEmitter.DEFAULT_UA, skipFirstLoad = false } = {}) {
-		
+
 		super();
 
 		this.userAgent = userAgent;         /** @type {string} */
@@ -74,6 +74,31 @@ class FeedEmitter extends EventEmitter {
 	}
 
 	/**
+	 * @method init
+	 * @description Loads all feeds from the database and starts their fetching intervals.
+	 * 				This should be called once on application startup.
+	 * 
+	 * * @returns {Promise<void>}
+	 */
+	async init() {
+		try {
+			const allFeeds = await this.feedService.getAll();
+			let startedCount = 0;
+
+			for (const feedConfig of allFeeds) {
+				// Process feeds sequentially during startup for safer initial DB access.
+				await this.startFeedInterval(feedConfig);
+				startedCount++;
+			}
+			return startedCount;
+
+		} catch (error) {
+			this.emit('error', new FeedError('Failed to load initial feeds from database', 'db_error', null, null, error));
+			return 0;
+		}
+	}
+
+	/**
 	 * @method add
 	 * @description Adds one or more new feed configurations to the database,
 	 *				and initializes their fetching intervals.
@@ -90,7 +115,7 @@ class FeedEmitter extends EventEmitter {
 			try {
 				// Validate the configuration object.
 				FeedEmitter.validateFeedObject(config, this.userAgent);
-				
+
 				// Handle both single URL strings and arrays of URLs.
 				const urls = Array.isArray(config.url) ? config.url : [config.url];
 
@@ -143,7 +168,104 @@ class FeedEmitter extends EventEmitter {
 	 */
 	get list() {
 		// Asynchronously fetch all feed configurations from the database.
-		return this.feedService.getAll(); 
+		return this.feedService.getAll();
+	}
+
+	/**
+	 * @method getFeedConfig
+	 * @description Retrieves the current configuration of an actively running feed.
+	 * 				This config contains the original `refresh` rate needed for backoff calculations.
+	 *
+	 * @param {string} url - The URL of the feed.
+	 * @returns {Feed|null} The running Feed instance or null if not found.
+	 */
+	getFeedConfig(url) {
+		const activeFeed = this.activeIntervals.get(url);
+
+		if (activeFeed && activeFeed.feed) {
+			// The running Feed instance holds the config (id, url, refresh, etc.)
+			return activeFeed.feed;
+		}
+		return null;
+	}
+
+	/**
+	 * @method reloadFeeds
+	 * @description Stops all current intervals and re-initializes the aggregator 
+	 * 				by loading the latest configuration from the database.
+	 * 
+	 * @returns {Promise<number>} The number of feeds successfully restarted.
+	 */
+	async reloadFeeds() {
+		this.destroy(); // Stop all running intervals and clear tracking
+		return await this.init(); // Load and start feeds again
+	}
+
+	/**
+	 * @private
+	 * @method createSetInterval
+	 * @description Creates a refresh interval for a feed and triggers the initial fetch.
+	 *
+	 * @async
+	 * @param {Feed} feed - Feed object to set interval for.
+	 * @returns {Promise<NodeJS.Timeout|null>} The ID of the interval, or null if the initial fetch failed.
+	 */
+	async createSetInterval(feed) {
+
+		// Initialize the manager for this specific feed.
+		const feedManager = new FeedManager(this, feed);
+
+		// Trigger the initial fetch immediately and AWAIT the result.
+		// getContent() must return a boolean indicating success/failure.
+		const success = await feedManager.getContent(this.skipFirstLoad);
+
+		if (success) {
+			// Only set up the recurring interval if the initial fetch was successful.
+			return setInterval(() => feedManager.getContent(), feed.refresh);
+		} else {
+			// If it failed, the backoff logic (via Aggregator.handleError) will call updateInterval()
+			// to start a new, slower interval. Return null to signal the initial attempt failed.
+			return null;
+		}
+	}
+
+	/**
+	 * @method updateInterval
+	 * @description Stops the current interval for a feed, updates its configuration 
+	 * 				in the database, and starts a new interval with the provided time.
+	 *
+	 * @param {string} url - The URL of the feed to update.
+	 * @param {number} newInterval - The new refresh interval in milliseconds.
+	 * @returns {Promise<void>}
+	 */
+	async updateInterval(url, newInterval) {
+
+		const activeFeedEntry = this.activeIntervals.get(url);
+
+		if (activeFeedEntry) {
+
+			// STOP THE OLD INTERVAL
+			this.stopFeedInterval(url);
+
+			// UPDATE CONFIG IN DATABASE
+			const feedConfig = activeFeedEntry.feed;
+
+			// Create a config object for the service layer
+			const updatedConfig = {
+				...feedConfig,
+				refresh: newInterval
+			};
+
+			// This update persists the new, slower refresh rate in the database.
+			const dbFeedConfig = await this.feedService.addOrUpdate(updatedConfig);
+
+			// START A NEW INTERVAL
+			// The original Feed instance is discarded, and a new one is started with the new config.
+			await this.startFeedInterval(dbFeedConfig);
+
+		} else {
+			console.warn(`[FeedEmitter] Cannot update interval for non-running feed: ${url}`);
+		}
 	}
 
 	/**
@@ -160,16 +282,16 @@ class FeedEmitter extends EventEmitter {
 		this.stopFeedInterval(feedConfig.url);
 
 		// Create a new Feed instance with the configuration.
-		const feed = new Feed({ 
-			...feedConfig, 
-			handler: { handle: this.onError.bind(this) } 
+		const feed = new Feed({
+			...feedConfig,
+			handler: { handle: this.onError.bind(this) }
 		});
-		
-		// 3. Setup interval and await the result of the initial fetch.
+
+		// Setup interval and await the result of the initial fetch.
 		const intervalId = await this.createSetInterval(feed);
-		
+
 		// Store the interval ID (may be null if initial fetch failed) and the feed instance.
-        this.activeIntervals.set(feed.url, { intervalId, feed });
+		this.activeIntervals.set(feed.url, { intervalId, feed });
 	}
 
 	/**
@@ -183,49 +305,21 @@ class FeedEmitter extends EventEmitter {
 	stopFeedInterval(url) {
 
 		const activeFeed = this.activeIntervals.get(url);
-		
-		if (activeFeed && activeFeed.intervalId !== null) {
-            // Use standard `clearInterval`
-            clearInterval(activeFeed.intervalId);
 
-            // Call destroy on the Feed instance (a no-op in the reviewed code, but good practice).
-            activeFeed.feed.destroy(); 
-            
-            // Mark the interval as null in case the feed object is still tracked (e.g., waiting for backoff)
-            activeFeed.intervalId = null;
-        }
+		if (activeFeed && activeFeed.intervalId !== null) {
+			// Use standard `clearInterval`
+			clearInterval(activeFeed.intervalId);
+
+			// Call destroy on the Feed instance (a no-op in the reviewed code, but good practice).
+			activeFeed.feed.destroy();
+
+			// Mark the interval as null in case the feed object is still tracked (e.g., waiting for backoff)
+			activeFeed.intervalId = null;
+		}
 
 		// Remove tracking entirely only if the interval was running AND it's not needed for backoff tracking,
-        // but since Aggregator.getFeedConfig needs it, we only delete if we're doing a full DB removal.
-        // For simple stops/updates, we leave the entry with intervalId: null.
-	}
-
-	/**
-	 * @private
-	 * @method createSetInterval
-	 * @description Creates a refresh interval for a feed and triggers the initial fetch.
-	 *
-	 * @async
-	 * @param {Feed} feed - Feed object to set interval for.
-	 * @returns {Promise<NodeJS.Timeout|null>} The ID of the interval, or null if the initial fetch failed.
-	 */
-	async createSetInterval(feed) {
-
-		// Initialize the manager for this specific feed.
-		const feedManager = new FeedManager(this, feed);
-		
-		// Trigger the initial fetch immediately and AWAIT the result.
-        // getContent() must return a boolean indicating success/failure.
-        const success = await feedManager.getContent(this.skipFirstLoad);
-
-		if (success) {
-            // Only set up the recurring interval if the initial fetch was successful.
-            return setInterval(() => feedManager.getContent(), feed.refresh);
-        } else {
-            // If it failed, the backoff logic (via Aggregator.handleError) will call updateInterval()
-            // to start a new, slower interval. Return null to signal the initial attempt failed.
-            return null;
-        }
+		// but since Aggregator.getFeedConfig needs it, we only delete if we're doing a full DB removal.
+		// For simple stops/updates, we leave the entry with intervalId: null.
 	}
 
 	/**
@@ -241,117 +335,23 @@ class FeedEmitter extends EventEmitter {
 	}
 
 	/**
-     * @method destroy
-     * @description Clears all feeds, stopping their refresh intervals, and empties the feed map.
-     * 				This is the correct method for graceful shutdown.
-     *
-     * @returns {void}
-     */
-    destroy() {
-        // Use stopFeedInterval logic for a clean shutdown of each running feed.
-        // Get all URLs and stop them one by one.
-        for (const url of this.activeIntervals.keys()) {
-            this.stopFeedInterval(url);
-        }
-
-        // Clear the internal map entirely after all intervals are stopped.
-        this.activeIntervals.clear();
-        console.log('[FeedEmitter] All polling intervals stopped and feed tracking cleared.'); // Console output for clarity
-    }
-
-	/**
-	 * @method init
-	 * @description Loads all feeds from the database and starts their fetching intervals.
-	 * 				This should be called once on application startup.
-	 * 
-	 * * @returns {Promise<void>}
-	 */
-	async init() {
-        try {
-            const allFeeds = await this.feedService.getAll();
-            let startedCount = 0;
-            
-            for (const feedConfig of allFeeds) {
-                // Process feeds sequentially during startup for safer initial DB access.
-                await this.startFeedInterval(feedConfig);
-                startedCount++;
-            }
-            return startedCount;
-
-        } catch (error) {
-            this.emit('error', new FeedError('Failed to load initial feeds from database', 'db_error', null, null, error));
-            return 0;
-        }
-    }
-
-	/**
-     * @method getFeedConfig
-     * @description Retrieves the current configuration of an actively running feed.
-     * 				This config contains the original `refresh` rate needed for backoff calculations.
-     *
-     * @param {string} url - The URL of the feed.
-     * @returns {Feed|null} The running Feed instance or null if not found.
-     */
-    getFeedConfig(url) {
-        const activeFeed = this.activeIntervals.get(url);
-        
-        if (activeFeed && activeFeed.feed) {
-            // The running Feed instance holds the config (id, url, refresh, etc.)
-            return activeFeed.feed; 
-        }
-        return null;
-    }
-
-	/**
-	 * @method updateInterval
-	 * @description Stops the current interval for a feed, updates its configuration 
-	 * 				in the database, and starts a new interval with the provided time.
+	 * @method destroy
+	 * @description Clears all feeds, stopping their refresh intervals, and empties the feed map.
+	 * 				This is the correct method for graceful shutdown.
 	 *
-	 * @param {string} url - The URL of the feed to update.
-	 * @param {number} newInterval - The new refresh interval in milliseconds.
-	 * @returns {Promise<void>}
+	 * @returns {void}
 	 */
-	async updateInterval(url, newInterval) {
-
-		const activeFeedEntry = this.activeIntervals.get(url);
-
-		if (activeFeedEntry) {
-			
-			// STOP THE OLD INTERVAL
+	destroy() {
+		// Use stopFeedInterval logic for a clean shutdown of each running feed.
+		// Get all URLs and stop them one by one.
+		for (const url of this.activeIntervals.keys()) {
 			this.stopFeedInterval(url);
-
-			// UPDATE CONFIG IN DATABASE
-			const feedConfig = activeFeedEntry.feed;
-			
-			// Create a config object for the service layer
-			const updatedConfig = { 
-				...feedConfig, 
-				refresh: newInterval 
-			};
-
-			// This update persists the new, slower refresh rate in the database.
-            const dbFeedConfig = await this.feedService.addOrUpdate(updatedConfig);
-			
-			// 3. START A NEW INTERVAL
-            // The original Feed instance is discarded, and a new one is started with the new config.
-            await this.startFeedInterval(dbFeedConfig);
-
-		} else {
-			console.warn(`[FeedEmitter] Cannot update interval for non-running feed: ${url}`);
 		}
-	}
 
-	/**
-     * @method reloadFeeds
-     * @description Stops all current intervals and re-initializes the aggregator 
-     * 				by loading the latest configuration from the database.
-	 * 
-     * @returns {Promise<number>} The number of feeds successfully restarted.
-     */
-    async reloadFeeds() {
-        this.destroy(); // Stop all running intervals and clear tracking
-        return await this.init(); // Load and start feeds again
-    }
+		// Clear the internal map entirely after all intervals are stopped.
+		this.activeIntervals.clear();
+		console.log('[FeedEmitter] All polling intervals stopped and feed tracking cleared.'); // Console output for clarity
+	}
 
 }
 
