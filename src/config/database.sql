@@ -83,6 +83,9 @@ CREATE TABLE `rss_news` (
   -- but a simple index on url for quick lookup may be kept if desired:
   -- KEY `idx_url` (`url`),
   -- UNIQUE KEY `uq_url` (`url`),
+
+  -- READ PERFORMANCE: Speeds up history lookups (SELECT) on the URL column.
+  -- KEY `idx_url` (`url`),
   
   KEY `idx_category` (`category`),
   KEY `idx_website` (`website`),
@@ -128,6 +131,17 @@ ENGINE=InnoDB
 DEFAULT CHARSET=utf8mb4 
 COLLATE=utf8mb4_unicode_ci 
 COMMENT='Error log for feed processing failures';
+
+-- ========================================
+-- EVENTS
+-- Ensure the event scheduler is enabled when this script runs, if necessary
+-- SET GLOBAL event_scheduler = ON; 
+-- ========================================
+
+-- CREATE EVENT daily_rss_cleanup
+-- ON SCHEDULE EVERY 1 DAY
+-- STARTS CURRENT_TIMESTAMP
+-- DO DELETE FROM rss_news WHERE date < DATE_SUB(CURDATE(), INTERVAL 1 DAY);
 
 -- ========================================
 -- Optional: Insert default category (e.g., "Uncategorized")
