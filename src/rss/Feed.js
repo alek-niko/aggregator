@@ -31,7 +31,7 @@ const ALLOWED_MIMES = [
 	'text/xml',
 	'application/atom+xml',
 	'application/rss+xml'
-  ];
+];
 
 /**
  * @class Feed
@@ -57,50 +57,39 @@ class Feed {
 			throw new TypeError('Feed initialization failed: Missing required field `url` or `id`.');
 		}
 
-		this.id 		= data.id;						/** @type {number} */
-		this.name		= data.name;					/** @type {string} */
-		this.url		= data.url;						/** @type {string} */
-		this.category	= data.category || null;		/** @type {number|null} */
-		this.refresh	= data.refresh || (60000 * 60);	/** @type {number} */
-		this.userAgent	= data.userAgent;				/** @type {string} */
-		this.eventName	= data.eventName || 'new-item';	/** @type {string} */
-		this.handler	= data.handler;					/** @type {Object} */
+		this.id = data.id;								/** @type {number} */
+		this.name = data.name;							/** @type {string} */
+		this.url = data.url;							/** @type {string} */
+		this.category = data.category || null;			/** @type {number|null} */
+		this.refresh = data.refresh || (60000 * 60);	/** @type {number} */
+		this.userAgent = data.userAgent;				/** @type {string} */
+		this.eventName = data.eventName || 'new-item';	/** @type {string} */
+		this.handler = data.handler;					/** @type {Object} */
 
 		// Initialize the asynchronous ItemService layer
 		this.itemService = new ItemService();
 	}
 
 	/**
-	 * @method findItem
-	 * @description Asynchronously checks if an item (identified by Feed ID, URL, or Title)
-	 * 				already exists in the feed's persistent history (MySQL).
-	 *
-	 * @param {Object} item - The item object to check, containing `url` and `title`.
-	 * @returns {Promise<boolean>} Resolves to `true` if the item exists in the DB, otherwise `false`.
+	 * @method addBulkInsertIgnore
+	 * @description Delegates the race-safe, high-performance insertion of a list of items
+	 * 				to the underlying ItemService.
+	 * 
+	 * @param {Array<Array>} bulkValues - The array of [title, url, category, website] arrays.
+	 * @returns {Promise<void>}
 	 */
-	async findItem(item) {
-
-		if (!item || (!item.url && !item.title)) {
-			// Treat invalid item as existing to prevent processing
-			return true; 
-		}
-		
-		// Delegates the existence check to the ItemService using the feed's unique ID.
-		const exists = await this.itemService.exists(this.id, item.url, item.title);
-		
-		return exists;
+	async addBulkInsertIgnore(bulkValues) {
+		await this.itemService.addBulkInsertIgnore(bulkValues);
 	}
 
 	/**
-	 * @method addItem
-	 * @description Inserts a new standardized item into the feed items table in MySQL.
-	 *
-	 * @param {Object} item - The standardized item object (must contain website/category IDs).
-	 * @returns {Promise<void>}
+	 * @method getInsertedItemsByUrlAndDate
+	 * @description Delegates retrieval of new items to the ItemService.
+	 * 
+	 * @returns {Promise<Object[]>}
 	 */
-	async addItem(item) {
-		// Delegates the insertion to the ItemService. The service/model should handle unique constraints.
-		await this.itemService.insert(item);
+	async getInsertedItemsByUrlAndDate(websiteId, urls, startTime) {
+		return await this.itemService.getInsertedItemsByUrlAndDate(websiteId, urls, startTime);
 	}
 
 	/**
@@ -154,15 +143,15 @@ class Feed {
 			return feedItems;
 
 		} catch (error) {
-			
+
 			// If the error is NOT already a FeedError (e.g., network error from `fetch`),
 			// wrap it before routing it to the handler.
-			const routedError = (error instanceof FeedError) 
-				? error 
+			const routedError = (error instanceof FeedError)
+				? error
 				: new FeedError(
-					error.message, 
+					error.message,
 					error.name || 'fetch_url_error', // Default to fetch error name
-					this.url, 
+					this.url,
 					this.id
 				);
 
@@ -199,7 +188,7 @@ class Feed {
 
 			// Check if itemDate is a valid date object and within the last 24 hours
 			if (
-				!isNaN(itemDate.getTime()) && 
+				!isNaN(itemDate.getTime()) &&
 				(now.getTime() - itemDate.getTime() <= oneDayMs)
 			) {
 				// Push a new object to feedItems with standardized properties
@@ -226,6 +215,7 @@ class Feed {
 	 * @returns {void}
 	 */
 	handleError(error) {
+
 		if (this.handler && typeof this.handler.handle === 'function') {
 			this.handler.handle(error);
 		} else {
@@ -237,13 +227,15 @@ class Feed {
 	/**
 	 * @method destroy
 	 * @description Cleans up the feed instance. (No action needed here since intervals are
-	 * managed externally in FeedEmitter).
-	 *
+	 * 				managed externally in FeedEmitter).
+	 * 
+	 * @depricated This function is deprecated.
 	 * @returns {void}
 	 */
 	destroy() {
 		// No resources (intervals, maps) are held by this instance, so destruction is a no-op.
 	}
+	
 }
 
 export default Feed;
