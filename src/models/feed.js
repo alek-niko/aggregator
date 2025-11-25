@@ -52,21 +52,26 @@ async function insert(feedConfig) {
  */
 async function update(feedConfig) {
 
-	// NOTE: Refined to use the primary key `id` for more reliable and efficient updates.
-	const sqlQuery = `
-		UPDATE rss_sites SET name = ?, category = ?, refresh = ? 
-		WHERE url = ?
-	`;
+    // 1. Correct the SQL query to use the ID in the WHERE clause.
+    const sqlQuery = `
+        UPDATE rss_sites 
+        SET name = ?, category = ?, refresh = ?, url = ?  
+        WHERE id = ? 
+    `;
    
-	const [result] = await execute(sqlQuery, [
-		feedConfig.name, 
-		feedConfig.url,
-		feedConfig.category, 
-		feedConfig.refresh,
-		feedConfig.id
-	]);
+    // 2. Correct the parameter array to match the 5 placeholders above.
+    const [result] = await execute(sqlQuery, [
+        // SET values
+        feedConfig.name, 
+        feedConfig.category, 
+        feedConfig.refresh,
+        feedConfig.url,      // Add URL to SET clause if it can change
+        
+        // WHERE value (the ID)
+        feedConfig.id
+    ]);
 
-	return result.affectedRows;
+    return result.affectedRows;
 }
 
 /**
